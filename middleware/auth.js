@@ -14,6 +14,7 @@ const generateToken = (userId) => {
 
 /**
  * Attach a JWT as an HTTP-only cookie on the response.
+ * Updated for production cross-site compatibility (Vercel <-> Render).
  * @param {object} res - Express response object.
  * @param {string} token - Signed JWT.
  */
@@ -22,19 +23,19 @@ const attachCookieToResponse = (res, token) => {
 
   res.cookie('token', token, {
     httpOnly: true, // Prevents client-side JS from reading the cookie
-    secure: isProduction, // Only send over HTTPS in production
-    sameSite: isProduction ? 'strict' : 'lax',
+    // In production, we MUST use secure: true and sameSite: 'none' 
+    // for cross-site cookie sharing between Vercel and Render.
+    secure: isProduction, 
+    sameSite: isProduction ? 'none' : 'lax', 
     maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days in milliseconds
   });
 };
 
 /**
  * Express middleware: protect routes by verifying the JWT from cookies.
- * On success, attaches `req.user` with the full user document (minus password).
  */
 const protect = async (req, res, next) => {
   try {
-    // 1. Extract token from cookie
     const token = req.cookies?.token;
 
     if (!token) {
@@ -44,12 +45,10 @@ const protect = async (req, res, next) => {
       });
     }
 
-    // 2. Verify token
     let decoded;
     try {
       decoded = jwt.verify(token, process.env.JWT_SECRET);
     } catch (err) {
-      // Handle specific JWT errors for better client feedback
       const message =
         err.name === 'TokenExpiredError'
           ? 'Session expired. Please log in again.'
@@ -58,7 +57,6 @@ const protect = async (req, res, next) => {
       return res.status(401).json({ success: false, message });
     }
 
-    // 3. Confirm user still exists in the database
     const user = await User.findById(decoded.id);
     if (!user) {
       return res.status(401).json({
@@ -67,7 +65,6 @@ const protect = async (req, res, next) => {
       });
     }
 
-    // 4. Attach user to request and proceed
     req.user = user;
     next();
   } catch (err) {
@@ -81,8 +78,6 @@ const protect = async (req, res, next) => {
 
 /**
  * Express middleware: restrict access to specific roles.
- * Must be used AFTER the `protect` middleware.
- * @param  {...string} roles - Allowed roles (e.g., 'admin', 'teacher').
  */
 const authorize = (...roles) => {
   return (req, res, next) => {
