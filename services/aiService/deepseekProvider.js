@@ -7,10 +7,10 @@
  * Enforces JSON-only output via response_format and sanitization logic.
  */
 const { OpenAI } = require('openai');
-const { 
-  isServiceUnavailableError, 
-  retryOn503, 
-  sanitizeJsonResponse 
+const {
+  isServiceUnavailableError,
+  retryOn503,
+  sanitizeJsonResponse
 } = require('./shared');
 
 // ─── Client initialization ─────────────────────────────────────────────────
@@ -58,7 +58,7 @@ async function generateContent(systemInstruction, userPrompt, options = {}) {
     try {
       const result = await client.chat.completions.create(requestPayload);
       const content = result?.choices?.[0]?.message?.content;
-      
+
       if (!content) {
         throw new Error('DeepSeek returned an empty response.');
       }

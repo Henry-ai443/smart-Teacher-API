@@ -43,7 +43,7 @@ function parseJsonText(text) {
 }
 
 async function parseWeekBlock(block) {
-  const prompt = `Extract the following scheme of work text into clean JSON. Split each lesson into a JSON object with exactly these keys: week, lessonNumber, strand, subStrand, specificLearningOutcomes, keyInquiryQuestions, learningExperiences, learningResources. Use arrays of strings for the learning outcome and experience fields. Use an integer for lessonNumber. If a field cannot be inferred, return an empty string or empty array. Output only valid JSON without markdown, labels, or explanation.\n\nText:\n${block}`;
+  const prompt = `Extract the following scheme of work text into clean JSON. Each item should be a JSON object with exactly these keys: subject, grade, strand, subStrand, specificLearningOutcomes, keyInquiryQuestions, learningExperiences, learningResources, assessmentMethods. Use arrays of strings for the list fields. If a field cannot be inferred, return an empty string or empty array. Output only valid JSON without markdown, labels, or explanation.\n\nText:\n${block}`;
 
   const response = await geminiModel.generateContent({
     contents: prompt,
@@ -58,35 +58,120 @@ async function parseWeekBlock(block) {
 }
 
 function normalizeEntry(entry) {
+  const normalizeArray = (value) => {
+    if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
+    if (typeof value === 'string' && value.trim()) return [value.trim()];
+    return [];
+  };
+
   return {
-    week: entry.week ? String(entry.week).trim() : '',
-    lessonNumber: Number.isInteger(entry.lessonNumber)
-      ? entry.lessonNumber
-      : parseInt(entry.lessonNumber, 10) || 0,
+    subject: entry.subject ? String(entry.subject).trim() : '',
+    grade: entry.grade ? String(entry.grade).trim() : '',
     strand: entry.strand ? String(entry.strand).trim() : '',
     subStrand: entry.subStrand ? String(entry.subStrand).trim() : '',
-    specificLearningOutcomes: Array.isArray(entry.specificLearningOutcomes)
-      ? entry.specificLearningOutcomes.map((item) => String(item).trim()).filter(Boolean)
-      : entry.specificLearningOutcomes
-      ? [String(entry.specificLearningOutcomes).trim()]
-      : [],
-    keyInquiryQuestions: Array.isArray(entry.keyInquiryQuestions)
-      ? entry.keyInquiryQuestions.map((item) => String(item).trim()).filter(Boolean)
-      : entry.keyInquiryQuestions
-      ? [String(entry.keyInquiryQuestions).trim()]
-      : [],
-    learningExperiences: Array.isArray(entry.learningExperiences)
-      ? entry.learningExperiences.map((item) => String(item).trim()).filter(Boolean)
-      : entry.learningExperiences
-      ? [String(entry.learningExperiences).trim()]
-      : [],
-    learningResources: Array.isArray(entry.learningResources)
-      ? entry.learningResources.map((item) => String(item).trim()).filter(Boolean)
-      : entry.learningResources
-      ? [String(entry.learningResources).trim()]
-      : [],
-    rawText: entry.rawText || '',
+    specificLearningOutcomes: normalizeArray(entry.specificLearningOutcomes),
+    keyInquiryQuestions: normalizeArray(entry.keyInquiryQuestions),
+    learningExperiences: normalizeArray(entry.learningExperiences),
+    learningResources: normalizeArray(entry.learningResources),
+    assessmentMethods: normalizeArray(entry.assessmentMethods),
   };
+}
+
+async function upsertSchemeOfWorkItem(teacherId, entry) {
+  const subStrandPayload = {
+    subStrandName: entry.subStrand,
+    specificLearningOutcomes: entry.specificLearningOutcomes,
+    keyInquiryQuestions: entry.keyInquiryQuestions,
+    learningExperiences: entry.learningExperiences,
+    learningResources: entry.learningResources,
+    assessmentMethods: entry.assessmentMethods,
+  };
+
+  const rootFilter = {
+    teacherId,
+    grade: entry.grade,
+    subject: entry.subject,
+  };
+
+  const scheme = await SchemeOfWork.findOneAndUpdate(
+    rootFilter,
+    {
+      $setOnInsert: {
+        teacherId,
+        grade: entry.grade,
+        subject: entry.subject,
+        strands: [],
+      },
+    },
+    {
+      upsert: true,
+      new: true,
+      setDefaultsOnInsert: true,
+    }
+  );
+
+  const updatedSubStrand = await SchemeOfWork.findOneAndUpdate(
+    {
+      _id: scheme._id,
+      'strands.strandName': entry.strand,
+      'strands.subStrands.subStrandName': entry.subStrand,
+    },
+    {
+      $set: {
+        'strands.$[strand].subStrands.$[subStrand].specificLearningOutcomes': entry.specificLearningOutcomes,
+        'strands.$[strand].subStrands.$[subStrand].keyInquiryQuestions': entry.keyInquiryQuestions,
+        'strands.$[strand].subStrands.$[subStrand].learningExperiences': entry.learningExperiences,
+        'strands.$[strand].subStrands.$[subStrand].learningResources': entry.learningResources,
+        'strands.$[strand].subStrands.$[subStrand].assessmentMethods': entry.assessmentMethods,
+      },
+    },
+    {
+      arrayFilters: [
+        { 'strand.strandName': entry.strand },
+        { 'subStrand.subStrandName': entry.subStrand },
+      ],
+      new: true,
+    }
+  );
+
+  if (updatedSubStrand) {
+    return updatedSubStrand;
+  }
+
+  const updatedStrand = await SchemeOfWork.findOneAndUpdate(
+    {
+      _id: scheme._id,
+      'strands.strandName': entry.strand,
+    },
+    {
+      $push: {
+        'strands.$[strand].subStrands': subStrandPayload,
+      },
+    },
+    {
+      arrayFilters: [{ 'strand.strandName': entry.strand }],
+      new: true,
+    }
+  );
+
+  if (updatedStrand) {
+    return updatedStrand;
+  }
+
+  const updatedScheme = await SchemeOfWork.findByIdAndUpdate(
+    scheme._id,
+    {
+      $push: {
+        strands: {
+          strandName: entry.strand,
+          subStrands: [subStrandPayload],
+        },
+      },
+    },
+    { new: true }
+  );
+
+  return updatedScheme;
 }
 
 // Apply auth protection and admin restriction to all routes in this file
@@ -209,37 +294,17 @@ router.post('/process-scheme', async (req, res) => {
     for (const block of blocks) {
       const parsedEntries = await parseWeekBlock(block);
       for (const rawEntry of parsedEntries) {
-        const entry = normalizeEntry({ ...rawEntry, rawText: block });
+        const entry = normalizeEntry(rawEntry);
 
-        if (!entry.week || !Number.isInteger(entry.lessonNumber) || entry.lessonNumber <= 0) {
+        if (!entry.subject || !entry.grade || !entry.strand || !entry.subStrand) {
           return res.status(400).json({
             success: false,
-            message: 'Parsed scheme data must include week and numeric lessonNumber for every entry.',
+            message: 'Parsed scheme data must include subject, grade, strand, and subStrand for every entry.',
             parsed: rawEntry,
           });
         }
 
-        const filter = {
-          week: entry.week,
-          lessonNumber: entry.lessonNumber,
-        };
-
-        const update = {
-          strand: entry.strand,
-          subStrand: entry.subStrand,
-          specificLearningOutcomes: entry.specificLearningOutcomes,
-          keyInquiryQuestions: entry.keyInquiryQuestions,
-          learningExperiences: entry.learningExperiences,
-          learningResources: entry.learningResources,
-          rawText: entry.rawText,
-        };
-
-        const document = await SchemeOfWork.findOneAndUpdate(filter, update, {
-          upsert: true,
-          new: true,
-          setDefaultsOnInsert: true,
-        });
-
+        const document = await upsertSchemeOfWorkItem(req.user._id, entry);
         savedDocuments.push(document);
       }
     }

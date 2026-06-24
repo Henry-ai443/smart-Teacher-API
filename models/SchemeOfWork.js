@@ -61,6 +61,11 @@ const schemeOfWorkSchema = new mongoose.Schema(
       required: [true, 'Grade is required'],
       trim: true,
     },
+    subject: {
+      type: String,
+      required: [true, 'Subject is required'],
+      trim: true,
+    },
     strands: {
       type: [strandSchema],
       default: [],
@@ -72,8 +77,8 @@ const schemeOfWorkSchema = new mongoose.Schema(
   }
 );
 
-// Compound unique index: one scheme document per (teacherId, grade)
-schemeOfWorkSchema.index({ teacherId: 1, grade: 1 }, { unique: true });
+// Compound unique index: one scheme document per (teacherId, grade, subject)
+schemeOfWorkSchema.index({ teacherId: 1, grade: 1, subject: 1 }, { unique: true });
 
 const SchemeOfWork = mongoose.model('SchemeOfWork', schemeOfWorkSchema, 'schemesofwork');
 module.exports = SchemeOfWork;
