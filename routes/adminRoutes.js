@@ -42,13 +42,38 @@ function parseJsonText(text) {
   }
 }
 
+class AiExtractionError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'AiExtractionError';
+  }
+}
+
+function validateSchemeEntry(entry) {
+  const missing = [];
+  if (!entry.subject) missing.push('subject');
+  if (!entry.grade) missing.push('grade');
+  if (!entry.strand) missing.push('strand');
+
+  if (missing.length > 0) {
+    throw new AiExtractionError(
+      `AI extraction failed: missing required fields: ${missing.join(', ')}.`
+    );
+  }
+}
+
 async function parseWeekBlock(block) {
+  const systemInstruction = `You are a strict JSON extraction assistant. Extract curriculum information as an array of objects and return only valid JSON. Each item must include exactly these fields: subject, grade, strand, subStrand, specificLearningOutcomes, keyInquiryQuestions, learningExperiences, learningResources, assessmentMethods. If a field is missing in the source document, return null or an empty string. Do not omit, skip, truncate, or invent fields.`;
   const prompt = `Extract the following scheme of work text into clean JSON. Each item should be a JSON object with exactly these keys: subject, grade, strand, subStrand, specificLearningOutcomes, keyInquiryQuestions, learningExperiences, learningResources, assessmentMethods. Use arrays of strings for the list fields. If a field cannot be inferred, return an empty string or empty array. Output only valid JSON without markdown, labels, or explanation.\n\nText:\n${block}`;
 
   const response = await geminiModel.generateContent({
-    contents: prompt,
+    contents: [
+      { role: 'system', parts: [{ text: systemInstruction }] },
+      { role: 'user', parts: [{ text: prompt }] },
+    ],
     generationConfig: {
       responseMimeType: 'application/json',
+      temperature: 0.1,
     },
   });
 
@@ -295,14 +320,7 @@ router.post('/process-scheme', async (req, res) => {
       const parsedEntries = await parseWeekBlock(block);
       for (const rawEntry of parsedEntries) {
         const entry = normalizeEntry(rawEntry);
-
-        if (!entry.subject || !entry.grade || !entry.strand || !entry.subStrand) {
-          return res.status(400).json({
-            success: false,
-            message: 'Parsed scheme data must include subject, grade, strand, and subStrand for every entry.',
-            parsed: rawEntry,
-          });
-        }
+        validateSchemeEntry(entry);
 
         const document = await upsertSchemeOfWorkItem(req.user._id, entry);
         savedDocuments.push(document);
@@ -317,6 +335,12 @@ router.post('/process-scheme', async (req, res) => {
     });
   } catch (err) {
     console.error('Process scheme error:', err);
+    if (err instanceof AiExtractionError) {
+      return res.status(400).json({
+        success: false,
+        message: err.message,
+      });
+    }
     res.status(500).json({
       success: false,
       message: err.message || 'Server error processing scheme document.',

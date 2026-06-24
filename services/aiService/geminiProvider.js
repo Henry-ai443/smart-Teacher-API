@@ -36,9 +36,11 @@ async function generateContent(systemInstruction, userPrompt, options = {}) {
   const model = genAI.getGenerativeModel({ model: MODEL_NAME });
 
   // Map OpenAI-style options to Gemini generationConfig
-  const generationConfig = {};
+  const generationConfig = {
+    responseMimeType: 'application/json',
+    temperature: options.temperature !== undefined ? options.temperature : 0.1,
+  };
   if (options.max_tokens) generationConfig.maxOutputTokens = options.max_tokens;
-  if (options.temperature !== undefined) generationConfig.temperature = options.temperature;
 
   const contents = [
     {
@@ -82,9 +84,11 @@ async function extractFromFile(base64Data, mimeType, systemInstruction, userProm
 
   const model = genAI.getGenerativeModel({ model: MODEL_NAME });
 
-  const generationConfig = { responseMimeType: 'application/json' };
+  const generationConfig = {
+    responseMimeType: 'application/json',
+    temperature: options.temperature !== undefined ? options.temperature : 0.1,
+  };
   if (options.max_tokens) generationConfig.maxOutputTokens = options.max_tokens;
-  if (options.temperature !== undefined) generationConfig.temperature = options.temperature;
 
   const contents = [
     {
