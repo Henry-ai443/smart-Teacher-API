@@ -49,6 +49,18 @@ class AiExtractionError extends Error {
   }
 }
 
+const SCHEME_FIELDS = [
+  'subject',
+  'grade',
+  'strand',
+  'subStrand',
+  'specificLearningOutcomes',
+  'keyInquiryQuestions',
+  'learningExperiences',
+  'learningResources',
+  'assessmentMethods',
+];
+
 function validateSchemeEntry(entry) {
   const missing = [];
   if (!entry.subject) missing.push('subject');
@@ -62,9 +74,18 @@ function validateSchemeEntry(entry) {
   }
 }
 
+function ensureExactSchemeSchema(entry) {
+  const missingKeys = SCHEME_FIELDS.filter((field) => !(field in entry));
+  if (missingKeys.length > 0) {
+    throw new AiExtractionError(
+      `AI extraction returned invalid JSON schema: missing fields ${missingKeys.join(', ')}.`
+    );
+  }
+}
+
 async function parseWeekBlock(block) {
-  const systemInstruction = `You are a strict JSON extraction assistant. Extract curriculum information as an array of objects and return only valid JSON. Each item must include exactly these fields: subject, grade, strand, subStrand, specificLearningOutcomes, keyInquiryQuestions, learningExperiences, learningResources, assessmentMethods. If a field is missing in the source document, return null or an empty string. Do not omit, skip, truncate, or invent fields.`;
-  const prompt = `Extract the following scheme of work text into clean JSON. Each item should be a JSON object with exactly these keys: subject, grade, strand, subStrand, specificLearningOutcomes, keyInquiryQuestions, learningExperiences, learningResources, assessmentMethods. Use arrays of strings for the list fields. If a field cannot be inferred, return an empty string or empty array. Output only valid JSON without markdown, labels, or explanation.\n\nText:\n${block}`;
+  const systemInstruction = `You are a strict JSON extraction assistant. Extract curriculum information as an array of objects and return only valid JSON. Each item must include exactly these fields: subject, grade, strand, subStrand, specificLearningOutcomes, keyInquiryQuestions, learningExperiences, learningResources, assessmentMethods. If a field is missing in the source document, return null for scalar fields or an empty array for list fields. Do not omit, skip, truncate, rename, or invent fields. Return raw JSON only, with no markdown, labels, or explanation.`;
+  const prompt = `Extract the following scheme of work text into clean JSON. Each item should be a JSON object with exactly these keys: subject, grade, strand, subStrand, specificLearningOutcomes, keyInquiryQuestions, learningExperiences, learningResources, assessmentMethods. Use arrays of strings for the list fields. If a field cannot be inferred, return an empty string for string fields, null for missing scalar values, or an empty array for list fields. Do not omit or remove any required field. Output only valid JSON without markdown, labels, or explanation.\n\nText:\n${block}`;
 
   const response = await geminiModel.generateContent({
     contents: [
@@ -79,7 +100,9 @@ async function parseWeekBlock(block) {
 
   const raw = response.response.text();
   const parsed = parseJsonText(raw);
-  return Array.isArray(parsed) ? parsed : [parsed];
+  const entries = Array.isArray(parsed) ? parsed : [parsed];
+  entries.forEach(ensureExactSchemeSchema);
+  return entries;
 }
 
 function normalizeEntry(entry) {
