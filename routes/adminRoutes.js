@@ -83,9 +83,33 @@ function ensureExactSchemeSchema(entry) {
   }
 }
 
-async function parseWeekBlock(block) {
+function chunkText(text, maxChunkSize = 2000) {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (!normalized) return [];
+
+  const chunks = [];
+  let start = 0;
+
+  while (start < normalized.length) {
+    let end = Math.min(start + maxChunkSize, normalized.length);
+    if (end < normalized.length) {
+      const splitAt = normalized.lastIndexOf(' ', end);
+      if (splitAt > start) {
+        end = splitAt;
+      }
+    }
+
+    const chunk = normalized.slice(start, end).trim();
+    if (chunk) chunks.push(chunk);
+    start = end;
+  }
+
+  return chunks;
+}
+
+async function parseTextChunk(chunk) {
   const systemInstruction = `You are a strict JSON extraction assistant. Extract curriculum information as an array of objects and return only valid JSON. Each item must include exactly these fields: subject, grade, strand, subStrand, specificLearningOutcomes, keyInquiryQuestions, learningExperiences, learningResources, assessmentMethods. If a field is missing in the source document, return null for scalar fields or an empty array for list fields. Do not omit, skip, truncate, rename, or invent fields. Return raw JSON only, with no markdown, labels, or explanation.`;
-  const prompt = `Extract the following scheme of work text into clean JSON. Each item should be a JSON object with exactly these keys: subject, grade, strand, subStrand, specificLearningOutcomes, keyInquiryQuestions, learningExperiences, learningResources, assessmentMethods. Use arrays of strings for the list fields. If a field cannot be inferred, return an empty string for string fields, null for missing scalar values, or an empty array for list fields. Do not omit or remove any required field. Output only valid JSON without markdown, labels, or explanation.\n\nText:\n${block}`;
+  const prompt = `Extract the following scheme of work text into clean JSON. Each item should be a JSON object with exactly these keys: subject, grade, strand, subStrand, specificLearningOutcomes, keyInquiryQuestions, learningExperiences, learningResources, assessmentMethods. Use arrays of strings for the list fields. If a field cannot be inferred, return an empty string for string fields, null for missing scalar values, or an empty array for list fields. Do not omit or remove any required field. Output only valid JSON without markdown, labels, or explanation.\n\nText:\n${chunk}`;
 
   const response = await geminiModel.generateContent({
     contents: [
@@ -103,6 +127,49 @@ async function parseWeekBlock(block) {
   const entries = Array.isArray(parsed) ? parsed : [parsed];
   entries.forEach(ensureExactSchemeSchema);
   return entries;
+}
+
+function mergeExtractedEntries(entries) {
+  const merged = {};
+  const listFields = [
+    'specificLearningOutcomes',
+    'keyInquiryQuestions',
+    'learningExperiences',
+    'learningResources',
+    'assessmentMethods',
+  ];
+
+  entries.forEach((entry) => {
+    ensureExactSchemeSchema(entry);
+
+    const key = `${entry.subject || ''}||${entry.grade || ''}||${entry.strand || ''}||${entry.subStrand || ''}`;
+
+    if (!merged[key]) {
+      merged[key] = {
+        subject: entry.subject || '',
+        grade: entry.grade || '',
+        strand: entry.strand || '',
+        subStrand: entry.subStrand || '',
+        specificLearningOutcomes: [],
+        keyInquiryQuestions: [],
+        learningExperiences: [],
+        learningResources: [],
+        assessmentMethods: [],
+      };
+    }
+
+    listFields.forEach((field) => {
+      const values = Array.isArray(entry[field]) ? entry[field] : entry[field] ? [entry[field]] : [];
+      values.forEach((value) => {
+        const trimmed = value == null ? '' : String(value).trim();
+        if (trimmed && !merged[key][field].includes(trimmed)) {
+          merged[key][field].push(trimmed);
+        }
+      });
+    });
+  });
+
+  return Object.values(merged);
 }
 
 function normalizeEntry(entry) {
@@ -326,28 +393,38 @@ router.post('/process-scheme', async (req, res) => {
       });
     }
 
-    const rawBuffer = fs.readFileSync(filePath);
+      const rawBuffer = fs.readFileSync(filePath);
     const pdfData = await pdfParse(rawBuffer);
     const rawText = pdfData.text || '';
-    const blocks = splitWeeklyBlocks(rawText);
-    if (blocks.length === 0) {
+    const chunks = chunkText(rawText, 2000);
+    if (chunks.length === 0) {
       return res.status(400).json({
         success: false,
-        message: 'Could not split the uploaded PDF text into week blocks. Make sure the document contains "Week" headings.',
+        message: 'Uploaded PDF text could not be chunked for extraction. Please upload a valid document.',
+      });
+    }
+
+    const extractedEntries = [];
+    for (const chunk of chunks) {
+      const parsedEntries = await parseTextChunk(chunk);
+      extractedEntries.push(...parsedEntries);
+    }
+
+    const mergedEntries = mergeExtractedEntries(extractedEntries);
+    if (mergedEntries.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'AI extraction returned no valid curriculum entries.',
       });
     }
 
     const savedDocuments = [];
+    for (const rawEntry of mergedEntries) {
+      const entry = normalizeEntry(rawEntry);
+      validateSchemeEntry(entry);
 
-    for (const block of blocks) {
-      const parsedEntries = await parseWeekBlock(block);
-      for (const rawEntry of parsedEntries) {
-        const entry = normalizeEntry(rawEntry);
-        validateSchemeEntry(entry);
-
-        const document = await upsertSchemeOfWorkItem(req.user._id, entry);
-        savedDocuments.push(document);
-      }
+      const document = await upsertSchemeOfWorkItem(req.user._id, entry);
+      savedDocuments.push(document);
     }
 
     res.status(200).json({
